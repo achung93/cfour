@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 
@@ -36,6 +36,7 @@ interface SocketContextType {
   createRoom: () => void;
   joinRoom: (code: string) => void;
   makeMove: (col: number) => void;
+  makeMoveHttp: (col: number) => Promise<void>;
   leaveRoom: () => void;
   playAgain: () => void;
   clearError: () => void;
@@ -58,6 +59,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const [screen, setScreen] = useState<Screen>('home');
   const [error, setError] = useState<string | null>(null);
   const [readyStatus, setReadyStatus] = useState<ReadyStatus | null>(null);
+  const pendingMoves = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     const newSocket = io(SERVER_URL);
@@ -100,8 +102,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setScreen('game');
     });
 
-    newSocket.on('move-made', ({ gameState }) => {
+    // Handle incoming move-made events. Server may echo back a `clientToken` we sent when making the move.
+    newSocket.on('move-made', (payload) => {
+      const { gameState, clientToken } = payload as any;
       setGameState(gameState);
+
+      if (clientToken && pendingMoves.current.has(clientToken)) {
+        const start = pendingMoves.current.get(clientToken)!;
+        const elapsed = Date.now() - start;
+        console.log(`Move roundtrip (ms) for token ${clientToken}: ${elapsed}ms`);
+        pendingMoves.current.delete(clientToken);
+      }
     });
 
     newSocket.on('game-over', ({ winner }) => {
@@ -138,7 +149,49 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   };
 
   const makeMove = (col: number) => {
-    socket?.emit('make-move', { col });
+    if (!socket) return;
+    // generate a client token so we can measure RTT when the server echoes it back
+    const clientToken = (crypto as any)?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingMoves.current.set(clientToken, Date.now());
+    socket.emit('make-move', { col, clientToken });
+  };
+
+  const makeMoveHttp = async (col: number) => {
+    // POST to server HTTP endpoint for performance comparison
+    try {
+      if (!roomCode || !socket) return;
+      const clientToken = (crypto as any)?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // record start time for full roundtrip (will be completed when 'move-made' arrives)
+      pendingMoves.current.set(clientToken, Date.now());
+
+      const start = Date.now();
+      const resp = await fetch(`${SERVER_URL}/api/make-move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomCode, col, playerId: socket.id, clientToken }),
+      });
+
+      const httpMs = Date.now() - start;
+
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ message: 'Unknown error' }));
+        setError(data.message || 'Move failed');
+        // remove pending token since it failed
+        pendingMoves.current.delete(clientToken);
+        return;
+      }
+
+      const data = await resp.json();
+      console.log(`HTTP /api/make-move response time (ms): ${httpMs}ms`);
+
+      // Server will also broadcast 'move-made' via sockets; `move-made` handler will compute full RTT
+      // Update local state optimistically with the response to reduce perceived latency
+      if (data.gameState) {
+        setGameState(data.gameState);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
   const leaveRoom = () => {
@@ -176,6 +229,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         createRoom,
         joinRoom,
         makeMove,
+        makeMoveHttp,
         leaveRoom,
         playAgain,
         clearError,

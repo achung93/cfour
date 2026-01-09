@@ -12,6 +12,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // Serve static files from the frontend build in production
 if (process.env.NODE_ENV === 'production') {
@@ -134,7 +135,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('make-move', ({ col }) => {
+  socket.on('make-move', (payload) => {
+    const { col, clientToken } = payload as { col?: number; clientToken?: string };
+    const start = Date.now();
+
     const roomCode = playerRooms.get(socket.id);
     if (!roomCode) {
       socket.emit('error', { message: 'Not in a room' });
@@ -160,12 +164,55 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Broadcast updated game state
-    io.to(roomCode).emit('move-made', { gameState: room.gameState });
+    const processingMs = Date.now() - start;
+    console.log(`WebSocket make-move processed in ${processingMs}ms (room ${roomCode}, player ${socket.id})`);
+
+    // Broadcast updated game state and echo client token so the client can measure RTT
+    io.to(roomCode).emit('move-made', { gameState: room.gameState, clientToken });
 
     if (room.gameState.winner) {
-      io.to(roomCode).emit('game-over', { winner: room.gameState.winner });
+      io.to(roomCode).emit('game-over', { winner: room.gameState.winner, clientToken });
     }
+  });
+
+  // HTTP fallback for making moves (useful for performance comparisons)
+  // Accepts JSON: { roomCode: string, col: number, playerId: string }
+  app.post('/api/make-move', (req, res) => {
+    const { roomCode, col, playerId, clientToken } = req.body as { roomCode?: string; col?: number; playerId?: string; clientToken?: string };
+
+    const start = Date.now();
+
+    if (!roomCode || typeof col !== 'number' || !playerId) {
+      return res.status(400).json({ success: false, message: 'Missing roomCode, col or playerId' });
+    }
+
+    const room = rooms.get(roomCode.toUpperCase());
+    if (!room) {
+      return res.status(404).json({ success: false, message: 'Room not found' });
+    }
+
+    // Find player by provided playerId
+    const player = room.gameState.players.find((p) => p.id === playerId);
+    if (!player) {
+      return res.status(404).json({ success: false, message: 'Player not found in room' });
+    }
+
+    const result = makeMove(room.gameState, col, player.playerNumber);
+    if (!result.success) {
+      return res.status(400).json({ success: false, message: 'Invalid move' });
+    }
+
+    const processingMs = Date.now() - start;
+    console.log(`HTTP /api/make-move processed in ${processingMs}ms (room ${roomCode}, player ${playerId})`);
+
+    // Broadcast updated game state to sockets in the room and echo clientToken
+    io.to(roomCode.toUpperCase()).emit('move-made', { gameState: room.gameState, clientToken });
+
+    if (room.gameState.winner) {
+      io.to(roomCode.toUpperCase()).emit('game-over', { winner: room.gameState.winner, clientToken });
+    }
+
+    return res.json({ success: true, gameState: room.gameState, clientToken });
   });
 
   socket.on('play-again', () => {

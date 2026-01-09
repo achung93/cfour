@@ -8,7 +8,8 @@ import GameBoard from './components/GameBoard'
 const TURN_TIME_LIMIT = 10; // seconds
 
 function GameScreen() {
-  const { gameState, playerNumber, makeMove, playAgain, leaveRoom } = useSocket();
+  const { gameState, playerNumber, makeMove, makeMoveHttp, playAgain, leaveRoom } = useSocket();
+  const [useHttp, setUseHttp] = useState(false);
   const [timeLeft, setTimeLeft] = useState(TURN_TIME_LIMIT);
   const timerRef = useRef<number | null>(null);
 
@@ -82,7 +83,11 @@ function GameScreen() {
 
   const handleCellClick = (_row: number, col: number) => {
     if (isMyTurn && !gameState.winner) {
-      makeMove(col);
+      if (useHttp) {
+        makeMoveHttp(col);
+      } else {
+        makeMove(col);
+      }
     }
   };
 
@@ -93,6 +98,16 @@ function GameScreen() {
         <span className="font-mono font-bold">{gameState.roomCode}</span>
         <span className="text-gray-400">|</span>
         <span>You are: <span className={playerNumber === 1 ? 'text-green-500' : 'text-blue-500'}>{myColor}</span></span>
+        <span className="text-gray-400">|</span>
+        <div className="flex items-center gap-2">
+          <span className="text-gray-400">Protocol:</span>
+          <button
+            onClick={() => setUseHttp((s) => !s)}
+            className="font-mono font-bold px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-black"
+          >
+            {useHttp ? 'HTTP' : 'WebSocket'}
+          </button>
+        </div>
       </div>
 
       {gameState.winner ? (
